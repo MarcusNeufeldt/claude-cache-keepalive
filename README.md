@@ -2,6 +2,8 @@
 
 Keeps prompt caches warm while a session sits idle: Claude Code (instead of idle compaction, "Compacted while idle, before the prompt cache expired") and Pi (claude-bridge and openai-codex).
 
+> **Required for Claude Code: turn idle compaction off.** Since v2.1.299, Claude Code compacts a 200K+ token conversation that has been idle for about 54 minutes, just before its one-hour cache expires. That compaction runs before the keep-alive ping would, so with it on the ping never gets a chance and you get a summary instead of your full conversation. Turn it off with `"idleCompaction": false` in `~/.claude/settings.json` (or the "Idle compaction" row in `/config`). `install.py` sets it for you. Normal auto-compaction, when the context window is full, stays on.
+
 ## What's in here
 
 | Path | What it is |
