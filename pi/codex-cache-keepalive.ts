@@ -7,9 +7,10 @@ import { join } from "node:path";
 // GPT-6.x caches live about 30 minutes and every read extends them, so after
 // PI_CODEX_KEEPALIVE_MS (default 25 min) without a request this re-sends the
 // last request's transcript plus a tiny prompt. The reply never enters the
-// session. It stops when pings would cost more than one cache rebuild (from the
-// model's prices; PI_CODEX_KEEPALIVE_MAX_PINGS caps it further) or when a ping
-// misses the cache. PI_CODEX_KEEPALIVE=off disables it.
+// session. It stops before the pings' real cost (cached read, uncached input
+// and output, from the model's prices) would pass what one rebuild adds, when
+// a ping misses the cache, or at PI_CODEX_KEEPALIVE_MAX_PINGS.
+// PI_CODEX_KEEPALIVE=off disables it.
 
 const PROVIDER = "openai-codex";
 const PING_TEXT = "Prompt-cache keep-alive ping. Do not use tools or do anything. Reply with exactly: ok";
@@ -27,13 +28,15 @@ function delayMs(): number {
   return Number(process.env.PI_CODEX_KEEPALIVE_MS) || 25 * 60_000;
 }
 
-/** Pings that still cost less than one rebuild, like Pi's own warmer reckons it. */
-function maxPings(model: Model): number {
-  const envCap = Number(process.env.PI_CODEX_KEEPALIVE_MAX_PINGS) || Infinity;
+function maxPings(): number {
+  return Number(process.env.PI_CODEX_KEEPALIVE_MAX_PINGS) || Infinity;
+}
+
+/** What a lapse adds over a hit: the prompt rewritten instead of read, in dollars. */
+function missCost(model: Model, promptTokens: number): number {
   const read = model.cost?.cacheRead ?? 0;
   const miss = (model.cost?.cacheWrite ?? 0) > 0 ? model.cost.cacheWrite : (model.cost?.input ?? 0);
-  const breakEven = read > 0 && miss > read ? Math.ceil((miss - read) / read - 1e-9) - 1 : DEFAULT_MAX_PINGS;
-  return Math.max(0, Math.min(breakEven, envCap));
+  return (promptTokens * Math.max(0, miss - read)) / 1e6;
 }
 
 function log(sessionId: string, text: string): void {
@@ -59,6 +62,9 @@ export default function (pi: ExtensionAPI) {
   let last: { model: Model; messages: unknown[] } | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let pings = 0;
+  // Dollars the pings since the last real request cost, and the latest one alone.
+  let spent = 0;
+  let lastPingCost = 0;
   // Bumped by every real request, so a ping that was in flight then is ignored.
   let gen = 0;
 
@@ -80,14 +86,20 @@ export default function (pi: ExtensionAPI) {
   const arm = (ctx: ExtensionContext) => {
     clear();
     if (!enabled() || !last) return;
-    const cap = maxPings(last.model);
-    if (pings >= cap) return stop(ctx, `${pings}/${cap} pings used`);
-    if (lastPromptTokens(ctx) < MIN_PROMPT_TOKENS) return status(ctx, undefined);
+    const promptTokens = lastPromptTokens(ctx);
+    if (promptTokens < MIN_PROMPT_TOKENS) return status(ctx, undefined);
+    if (pings >= maxPings()) return stop(ctx, `${pings} pings used`);
+    // Another ping like the last one would cost more than the rebuild it saves.
+    const budget = missCost(last.model, promptTokens);
+    if (budget > 0 && pings > 0 && spent + lastPingCost > budget) {
+      return stop(ctx, `pings cost $${spent.toFixed(3)}, a rebuild adds $${budget.toFixed(3)}`);
+    }
+    if (budget === 0 && pings >= DEFAULT_MAX_PINGS) return stop(ctx, `${pings} pings used, no prices`);
     const delay = delayMs();
     timer = setTimeout(() => void ping(ctx), delay);
     timer.unref?.();
     const at = new Date(Date.now() + delay).toTimeString().slice(0, 5);
-    status(ctx, `cache keep-alive: on | next ping ${at} | ${pings}/${cap}`);
+    status(ctx, `cache keep-alive: on | next ping ${at} | ${pings} pings`);
   };
 
   const ping = async (ctx: ExtensionContext) => {
@@ -121,7 +133,9 @@ export default function (pi: ExtensionAPI) {
     const u = result.usage;
     const total = u.input + u.cacheRead + u.cacheWrite;
     pings += 1;
-    log(sessionId, `ping ${pings}/${maxPings(last.model)} ${last.model.id} read=${u.cacheRead} write=${u.cacheWrite} input=${u.input} output=${u.output}`);
+    lastPingCost = u.cost?.total ?? 0;
+    spent += lastPingCost;
+    log(sessionId, `ping ${pings} ${last.model.id} read=${u.cacheRead} write=${u.cacheWrite} input=${u.input} output=${u.output} cost=$${lastPingCost.toFixed(4)}`);
     // Mostly uncached means the entry had already gone: more pings would only pay for rebuilds.
     if (total === 0 || u.cacheRead / total < 0.5) return stop(ctx, "ping missed the cache");
     arm(ctx);
@@ -131,6 +145,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("context_with_system", (event, ctx) => {
     gen += 1;
     pings = 0;
+    spent = 0;
+    lastPingCost = 0;
     clear();
     last = ctx.model?.provider === PROVIDER ? { model: ctx.model, messages: event.messages } : undefined;
     return undefined;

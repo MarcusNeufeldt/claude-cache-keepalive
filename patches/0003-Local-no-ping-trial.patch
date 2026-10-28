@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: claude-cache-keepalive <noreply@localhost>
+Date: Wed, 28 Oct 2026 21:40:00 +0000
+Subject: [PATCH] Local: no ping trial, full budget unless a ping fails to
+ extend the cache
+
+---
+diff --git a/.claude-plugin/plugin.json b/.claude-plugin/plugin.json
+index 347d63d..5a4fab1 100644
+--- a/.claude-plugin/plugin.json
++++ b/.claude-plugin/plugin.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "cache-refresher",
+-  "version": "0.2.2-local.2",
++  "version": "0.2.2-local.3",
+   "description": "Shows when your prompt cache expires and what rebuilding it would cost. Optional auto-refresh, off by default, keeps it active while you are away and uses a little plan usage or API credit.",
+   "author": {
+     "name": "olddonkey",
+diff --git a/hooks/model.ts b/hooks/model.ts
+index c033089..a3e651f 100644
+--- a/hooks/model.ts
++++ b/hooks/model.ts
+@@ -102,12 +102,12 @@ export function resumedTtl(gapMs: number, isLikelyExpired: boolean | undefined):
+   return isLikelyExpired ? '5m' : '1h'
+ }
+ 
+-/** The pings one idle stretch may spend: the person's cap, never past break-even, one until pings are proven. */
++/** The pings one idle stretch may spend: the person's cap, never past break-even, one once a ping was seen not to extend the cache (local: no trial before that). */
+ export function budgetOf(held: Snapshot, cap: number, known: Extension): number {
+   const costs = costsOf(held)
+   const limit = costs ? Math.min(cap, costs.maxPings) : cap
+ 
+-  return known[held.ttl] === true ? limit : Math.min(1, limit)
++  return known[held.ttl] === false ? Math.min(1, limit) : limit
+ }
+ 
+ /** When the next auto ping goes out, in the catalog's words. */
+diff --git a/hooks/views.ts b/hooks/views.ts
+index 5d4d174..91fbd83 100644
+--- a/hooks/views.ts
++++ b/hooks/views.ts
+@@ -532,7 +532,7 @@ export function paneView(
+   }
+ 
+   // What is pressed: the switch, with its budget on the line beneath.
+-  const isTrial = tracked !== null && known[tracked.ttl] !== true && policy.cap > 1
++  const isTrial = tracked !== null && known[tracked.ttl] === false && policy.cap > 1
+   const plan = !tracked
+     ? m.autoPlanOff(policy.cap, '')
+     : left <= 0
+-- 
+2.55.0
+

@@ -32,7 +32,7 @@ if [ ! -f "$SRC" ]; then
 elif grep -q "$REV" "$SRC"; then
   echo "[ok] pi-claude-bridge already patched ($REV)"
 else
-  VERSION=$(node -p "require('$BRIDGE/package.json').version")
+  VERSION=$(cd "$BRIDGE" && node -p "require('./package.json').version")
   PRISTINE=$AGENT/backups/pi-claude-bridge-$VERSION-index.ts.orig
   if grep -q "Cache keep-alive (local patch" "$SRC"; then
     # An older patch revision: start again from the pristine source.

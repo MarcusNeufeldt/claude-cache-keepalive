@@ -64,12 +64,17 @@ def install_plugin():
             sys.exit(1)
     else:
         # Re-read the folder so a changed plugin version is seen.
-        claude("plugin", "marketplace", "update", MARKETPLACE)
+        code, out = claude("plugin", "marketplace", "update", MARKETPLACE)
+        if code != 0:
+            print("[FAIL] marketplace update: " + last(out))
+            sys.exit(1)
 
     code, out = claude("plugin", "list")
     if PLUGIN in out:
         code, out = claude("plugin", "update", PLUGIN)
         print(("[ok] " if code == 0 else "[FAIL] ") + "plugin update: " + last(out))
+        if code != 0:
+            sys.exit(1)
     else:
         code, out = claude("plugin", "install", PLUGIN)
         print(("[ok] " if code == 0 else "[FAIL] ") + "plugin install: " + last(out))

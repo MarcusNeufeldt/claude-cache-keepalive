@@ -532,7 +532,7 @@ export function paneView(
   }
 
   // What is pressed: the switch, with its budget on the line beneath.
-  const isTrial = tracked !== null && known[tracked.ttl] !== true && policy.cap > 1
+  const isTrial = tracked !== null && known[tracked.ttl] === false && policy.cap > 1
   const plan = !tracked
     ? m.autoPlanOff(policy.cap, '')
     : left <= 0

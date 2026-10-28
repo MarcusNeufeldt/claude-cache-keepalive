@@ -102,12 +102,12 @@ export function resumedTtl(gapMs: number, isLikelyExpired: boolean | undefined):
   return isLikelyExpired ? '5m' : '1h'
 }
 
-/** The pings one idle stretch may spend: the person's cap, never past break-even, one until pings are proven. */
+/** The pings one idle stretch may spend: the person's cap, never past break-even, one once a ping was seen not to extend the cache (local: no trial before that). */
 export function budgetOf(held: Snapshot, cap: number, known: Extension): number {
   const costs = costsOf(held)
   const limit = costs ? Math.min(cap, costs.maxPings) : cap
 
-  return known[held.ttl] === true ? limit : Math.min(1, limit)
+  return known[held.ttl] === false ? Math.min(1, limit) : limit
 }
 
 /** When the next auto ping goes out, in the catalog's words. */
