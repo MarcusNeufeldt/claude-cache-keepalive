@@ -1,0 +1,59 @@
+From e8c7225ba4698ede061fa3ca100532e70e79dc4d Mon Sep 17 00:00:00 2001
+From: claude-cache-keepalive <noreply@localhost>
+Date: Wed, 28 Oct 2026 18:56:12 +0100
+Subject: [PATCH 1/2] Local: auto-refresh on by default, cap 200 (break-even
+ rule decides)
+
+---
+ .claude-plugin/marketplace.json | 2 +-
+ .claude-plugin/plugin.json      | 2 +-
+ hooks/register.tsx              | 4 ++--
+ 3 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/.claude-plugin/marketplace.json b/.claude-plugin/marketplace.json
+index a1caccd..62701d1 100644
+--- a/.claude-plugin/marketplace.json
++++ b/.claude-plugin/marketplace.json
+@@ -1,5 +1,5 @@
+ {
+-  "name": "olddonkey",
++  "name": "local-cache-refresher",
+   "description": "Claude Code plugins by olddonkey",
+   "owner": {
+     "name": "olddonkey"
+diff --git a/.claude-plugin/plugin.json b/.claude-plugin/plugin.json
+index f493479..5283406 100644
+--- a/.claude-plugin/plugin.json
++++ b/.claude-plugin/plugin.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "cache-refresher",
+-  "version": "0.2.2",
++  "version": "0.2.2-local.1",
+   "description": "Shows when your prompt cache expires and what rebuilding it would cost. Optional auto-refresh, off by default, keeps it active while you are away and uses a little plan usage or API credit.",
+   "author": {
+     "name": "olddonkey",
+diff --git a/hooks/register.tsx b/hooks/register.tsx
+index 93ea4bb..57be891 100644
+--- a/hooks/register.tsx
++++ b/hooks/register.tsx
+@@ -24,14 +24,14 @@ import { autoLines, report } from './report'
+ import { bandView, paneView } from './views'
+ import type { Motion } from './views'
+ 
+-const DEFAULT_CAP = 12
++const DEFAULT_CAP = 200
+ const MAX_CAP = 200
+ 
+ const PANE = 'cache'
+ 
+ const snap = atom({ plugin: 'cache-refresher', key: 'snapshot' } as const, null)
+ const auto = atom({ plugin: 'cache-refresher', key: 'auto' } as const, {
+-  isOn: false,
++  isOn: true,
+   cap: DEFAULT_CAP,
+ })
+ 
+-- 
+2.55.0
+

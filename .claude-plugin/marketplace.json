@@ -1,0 +1,14 @@
+{
+  "name": "claude-cache-keepalive",
+  "description": "Claude Code prompt-cache keepalive setup",
+  "owner": {
+    "name": "claude-cache-keepalive"
+  },
+  "plugins": [
+    {
+      "name": "cache-refresher",
+      "source": "./plugins/cache-refresher",
+      "description": "Patched olddonkey/cache-refresher: auto-refresh on by default, cap 200, pinned keep-alive status line."
+    }
+  ]
+}

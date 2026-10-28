@@ -1,0 +1,212 @@
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1763,8 +1763,175 @@
+ 
+ /** Provider entry point. Pi calls this for each new prompt and each tool result.
+  *  Two cases: tool result delivery (active query) or fresh query. */
++// --- Cache keep-alive (local patch, claude-cache-keepalive repo) ---
++// Claude Code writes 1h prompt-cache entries. When a pi session sits idle,
++// shortly before that hour runs out, resume the same CC session with the same
++// query options and a tiny prompt, without persisting it (persistSession:false):
++// the request reads the cached prefix, which restarts its lifetime, and leaves
++// both CC's session file and pi's history untouched.
++// Env: CLAUDE_BRIDGE_KEEPALIVE=off disables; CLAUDE_BRIDGE_KEEPALIVE_MS sets the
++// delay (default 55 min); CLAUDE_BRIDGE_KEEPALIVE_MAX_PINGS caps pings per idle
++// stretch (default 36, about where pings stop being cheaper than one rebuild).
++// pi/install.sh greps this to tell an older patch from the current one.
++const KEEPALIVE_PATCH_REV = 2;
++void KEEPALIVE_PATCH_REV;
++const KEEPALIVE_PROMPT ="Prompt-cache keep-alive ping. Do not use tools or do anything. Reply with exactly: ok";
++
++interface KeepaliveRecipe {
++	queryOptions: NonNullable<Parameters<typeof query>[0]["options"]>;
++	mcpTools: Tool[];
++}
++
++interface Keepalive {
++	recipe?: KeepaliveRecipe;
++	timer?: ReturnType<typeof setTimeout>;
++	pings: number;
++	/** Bumped by every real provider call, so a ping that was in flight then is ignored. */
++	gen: number;
++}
++
++const keepalives = new Map<string, Keepalive>();
++
++function keepaliveEnabled(): boolean {
++	return !["off", "0", "false", "no"].includes((process.env.CLAUDE_BRIDGE_KEEPALIVE ?? "").toLowerCase());
++}
++
++function keepaliveDelayMs(): number {
++	return Number(process.env.CLAUDE_BRIDGE_KEEPALIVE_MS) || 55 * 60_000;
++}
++
++function keepaliveMaxPings(): number {
++	return Number(process.env.CLAUDE_BRIDGE_KEEPALIVE_MAX_PINGS) || 36;
++}
++
++function keepaliveLog(piSessionId: string, text: string): void {
++	try {
++		appendFileSync(join(dirname(diagLogPath()), "cache-keepalive.log"), `${new Date().toISOString()} claude-bridge ${piSessionId.slice(0, 8)} ${text}\n`);
++	} catch {}
++	debug(`keepalive: ${piSessionId.slice(0, 8)} ${text}`);
++}
++
++function keepaliveStatus(text: string | undefined): void {
++	try { piUI?.setStatus("cache-keepalive", text); } catch {}
++}
++
++function keepaliveFor(piSessionId: string): Keepalive {
++	let k = keepalives.get(piSessionId);
++	if (!k) {
++		k = { pings: 0, gen: 0 };
++		keepalives.set(piSessionId, k);
++	}
++	return k;
++}
++
++/** A real provider call for this session: drop the pending ping and start the count over. */
++function keepaliveReset(piSessionId: string | null): void {
++	if (!piSessionId) return;
++	const k = keepaliveFor(piSessionId);
++	if (k.timer) clearTimeout(k.timer);
++	k.timer = undefined;
++	k.pings = 0;
++	k.gen += 1;
++}
++
++function keepaliveRecord(piSessionId: string | null, recipe: KeepaliveRecipe): void {
++	if (!piSessionId) return;
++	keepaliveFor(piSessionId).recipe = recipe;
++}
++
++function keepaliveStop(piSessionId: string, reason: string): void {
++	const k = keepalives.get(piSessionId);
++	if (k?.timer) clearTimeout(k.timer);
++	if (k) k.timer = undefined;
++	keepaliveLog(piSessionId, `stopped: ${reason}`);
++	keepaliveStatus(`cache keep-alive: stopped (${reason})`);
++}
++
++/** The session moved to another provider: stop warming Claude's cache until Claude runs again. */
++function keepaliveSwitchedAway(piSessionId: string): void {
++	const k = keepalives.get(piSessionId);
++	if (!k) return;
++	// A ping still in flight must not re-arm when it lands.
++	k.gen += 1;
++	if (k.timer) keepaliveStop(piSessionId, "model switched away from Claude");
++}
++
++function keepaliveCancelAll(): void {
++	for (const k of keepalives.values()) if (k.timer) clearTimeout(k.timer);
++	keepalives.clear();
++}
++
++/** Schedule the next ping from now, the moment the cache entry was last touched. */
++function keepaliveArm(piSessionId: string | null): void {
++	if (!piSessionId || !keepaliveEnabled()) return;
++	const k = keepaliveFor(piSessionId);
++	if (!k.recipe) return;
++	if (k.timer) clearTimeout(k.timer);
++	const max = keepaliveMaxPings();
++	if (k.pings >= max) {
++		keepaliveStop(piSessionId, `${k.pings}/${max} pings used`);
++		return;
++	}
++	const delay = keepaliveDelayMs();
++	k.timer = setTimeout(() => void keepalivePing(piSessionId), delay);
++	k.timer.unref?.();
++	const at = new Date(Date.now() + delay).toTimeString().slice(0, 5);
++	keepaliveStatus(`cache keep-alive: on | next ping ${at} | ${k.pings}/${max}`);
++}
++
++async function keepalivePing(piSessionId: string): Promise<void> {
++	const k = keepalives.get(piSessionId);
++	if (!k?.recipe) return;
++	k.timer = undefined;
++	const state = sessionStateFor(piSessionId);
++	if (!state?.sessionId) return keepaliveStop(piSessionId, "no Claude Code session");
++	if (state.needsRebuild) return keepaliveStop(piSessionId, "session will be rebuilt");
++	for (const c of activeQueryContexts) {
++		// A turn is running (or parked at a tool): it keeps the cache warm itself.
++		if (c.piSessionId === piSessionId && c.activeQuery) return keepaliveArm(piSessionId);
++	}
++
++	const gen = k.gen;
++	const startedAt = Date.now();
++	const { resume: _resume, mcpServers: _servers, debug: _debug, debugFile: _debugFile, stderr: _stderr, ...base } = k.recipe.queryOptions;
++	const mcpServers = buildMcpServers(k.recipe.mcpTools, new QueryContext());
++	let usage: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | undefined;
++	let failure: string | undefined;
++	const sdkQuery = queryImpl({
++		prompt: KEEPALIVE_PROMPT,
++		options: {
++			...base,
++			...(mcpServers ? { mcpServers } : {}),
++			resume: state.sessionId,
++			persistSession: false,
++			maxTurns: 1,
++		},
++	});
++	try {
++		for await (const message of sdkQuery) {
++			if (message.type === "result") usage = (message as { usage?: typeof usage }).usage;
++		}
++	} catch (err) {
++		failure = errorMessage(err);
++	} finally {
++		try { sdkQuery.close(); } catch {}
++	}
++
++	// A real turn started while the ping ran: it owns the timer now.
++	if (keepalives.get(piSessionId) !== k || k.gen !== gen) return;
++	if (failure || !usage) return keepaliveStop(piSessionId, `ping failed: ${failure ?? "no usage"}`);
++	const read = usage.cache_read_input_tokens ?? 0;
++	const total = read + (usage.cache_creation_input_tokens ?? 0) + (usage.input_tokens ?? 0);
++	k.pings += 1;
++	keepaliveLog(piSessionId, `ping ${k.pings}/${keepaliveMaxPings()} read=${read} write=${usage.cache_creation_input_tokens ?? 0} in ${Date.now() - startedAt}ms`);
++	// Mostly a write means the entry had already gone: more pings would only pay for rebuilds.
++	if (total === 0 || read / total < 0.5) return keepaliveStop(piSessionId, "ping missed the cache");
++	keepaliveArm(piSessionId);
++}
++
+ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+ 	showStartupNoticeOnce();
++	keepaliveReset(options?.sessionId ?? null);
+ 	// pi hands providers a transcript (prompt/tools folded into system messages) — fold it
+ 	// back out to the prompt/tools fields every cursor write, syncSharedSession call and
+ 	// prompt-capture lookup below assumes (issue #106).
+@@ -2060,6 +2227,7 @@
+ 		...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
+ 		...makeCliDebugOptions("provider"),
+ 	};
++	keepaliveRecord(piSessionId, { queryOptions, mcpTools });
+ 
+ 	debug("provider: fresh query",
+ 		`model=${cliModel} msgs=${context.messages.length} tools=${mcpTools.length}`,
+@@ -2144,6 +2312,8 @@
+ 					// A missed steer may precede the first mirror or arrive while this
+ 					// query is still able to complete. Preserve both rebuild signals.
+ 					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild });
++					// Top-level turns only: a reentrant query is a subagent nested in a parked turn.
++					if (!isReentrant) keepaliveArm(queryCtx.piSessionId);
+ 				}
+ 			}
+ 
+@@ -2449,6 +2619,7 @@
+ 		// top-level transition takes every mirror with it.
+ 		sharedSessions.clear();
+ 		historyRewrittenBySession.clear();
++		keepaliveCancelAll();
+ 
+ 		// Clear the global streamSimple if this instance registered it.
+ 		// This allows /reload to work — the old instance clears the flag so
+@@ -2518,6 +2689,8 @@
+ 	// buildSystemPrompt renders verbatim.
+ 	pi.on("agent_start", (_event, ctx) => {
+ 		recordSystemPrompt("agent_start", ctx.getSystemPrompt(), lastSystemPromptOptions);
++		// Keep-alive: a run on another provider means Claude is no longer in use here.
++		if (ctx.model?.provider !== PROVIDER_ID) keepaliveSwitchedAway(ctx.sessionManager.getSessionId());
+ 	});
+ 
+ 	// Mid-run re-renders: turn_start fires before every turn (first turn included)

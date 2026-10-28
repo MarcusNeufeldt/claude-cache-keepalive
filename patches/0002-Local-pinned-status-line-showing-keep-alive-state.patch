@@ -1,0 +1,63 @@
+From 334c982c2a4a42806f2f77934907ab926c8d0715 Mon Sep 17 00:00:00 2001
+From: claude-cache-keepalive <noreply@localhost>
+Date: Wed, 28 Oct 2026 19:01:30 +0100
+Subject: [PATCH 2/2] Local: pinned status line showing keep-alive state
+
+---
+ .claude-plugin/plugin.json |  2 +-
+ hooks/register.tsx         | 20 ++++++++++++++++++++
+ 2 files changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/.claude-plugin/plugin.json b/.claude-plugin/plugin.json
+index 5283406..347d63d 100644
+--- a/.claude-plugin/plugin.json
++++ b/.claude-plugin/plugin.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "cache-refresher",
+-  "version": "0.2.2-local.1",
++  "version": "0.2.2-local.2",
+   "description": "Shows when your prompt cache expires and what rebuilding it would cost. Optional auto-refresh, off by default, keeps it active while you are away and uses a little plan usage or API credit.",
+   "author": {
+     "name": "olddonkey",
+diff --git a/hooks/register.tsx b/hooks/register.tsx
+index 57be891..3eef943 100644
+--- a/hooks/register.tsx
++++ b/hooks/register.tsx
+@@ -190,6 +190,20 @@ async function remember($: EngineInterface, observation: Observation): Promise<v
+   await $.store.set(OBSERVATIONS, observed)
+ }
+ 
++// Local: the pinned status line's last text, so it is set only when it changes.
++let lastStatus: string | undefined
++
++/** Local: whether keep-alive is on, how long the cache has left, and pings used of the budget. */
++async function statusLineOf($: EngineInterface, held: Snapshot | null, now: number): Promise<string> {
++  const policy = await read($, auto)
++  if (!policy.isOn) return 'cache keep-alive: OFF'
++  if (!isTracked(held)) return 'cache keep-alive: on'
++  const remaining = remainingOf(held, now)
++  if (remaining <= 0) return 'cache keep-alive: on | cache cold'
++  const budget = budgetOf(held, policy.cap, await knownExtension($))
++  return `cache keep-alive: on | warm ${fmtRemaining(remaining)} | pings ${held.pingsSinceTurn}/${budget}`
++}
++
+ async function knownExtension($: EngineInterface): Promise<Extension> {
+   if (extension === undefined) {
+     const held = await $.store.get(EXTENDS)
+@@ -408,6 +422,12 @@ export const register: Register = on => {
+         lastHead = head
+         $.ui.invalidate('ui.render')
+       }
++      // Local: a pinned status line, so it is always visible whether keep-alive is on.
++      const line = await statusLineOf($, held, now)
++      if (line !== lastStatus) {
++        lastStatus = line
++        $.ui.status(line)
++      }
+ 
+       // The keep-alive. A request under way has already touched the cache.
+       if (held === null || pingAt !== null || inFlight > 0) return
+-- 
+2.55.0
+
